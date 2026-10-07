@@ -23,7 +23,6 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # FSM Состояния
 class AdminStates(StatesGroup):
-    waiting_for_password = State()
     add_truck_photo = State()
     add_truck_name = State()
     add_truck_desc = State()
@@ -78,14 +77,14 @@ async def init_db():
     """)
     await conn.close()
 
-# Проверка, есть ли у пользователя выбранный грузовик
+# Проверка наличия грузовика
 async def has_truck(user_id: int) -> bool:
     conn = await get_db()
     truck = await conn.fetchrow("SELECT id FROM trucks WHERE busy_by = $1", user_id)
     await conn.close()
     return truck is not None
 
-# Динамическое главное меню для пользователя
+# Главное меню пользователя
 async def get_user_main_kb(user_id: int):
     builder = ReplyKeyboardBuilder()
     in_trip = await has_truck(user_id)
@@ -110,7 +109,7 @@ async def get_user_main_kb(user_id: int):
 
     return builder.as_markup(resize_keyboard=True)
 
-# Меню админки
+# Главное меню администратора
 def get_admin_main_kb():
     builder = ReplyKeyboardBuilder()
     builder.button(text="➕ Добавить грузовик")
@@ -138,6 +137,26 @@ def get_tgk_friend_inline_kb():
     builder.button(text="🤝 ТГК Кента", url="https://t.me/dalnoboy_ETS")
     return builder.as_markup()
 
+# --- ИНЛАЙН КЛАВИАТУРА ДЛЯ ВВОДА ПИН-КОДА ---
+
+def get_pin_keyboard():
+    builder = InlineKeyboardBuilder()
+    # Кнопки от 1 до 9
+    for i in range(1, 10):
+        builder.button(text=str(i), callback_data=f"pin_num_{i}")
+    builder.adjust(3)
+
+    # Нижняя строчка: Стереть, 0, Отмена
+    builder.row(
+        types.InlineKeyboardButton(text="❌ Стереть", callback_data="pin_clear"),
+        types.InlineKeyboardButton(text="0", callback_data="pin_num_0"),
+        types.InlineKeyboardButton(text="🚫 Отмена", callback_data="pin_cancel")
+    )
+    return builder.as_markup()
+
+# Хранилище введенных PIN-кодов (в памяти)
+user_pins = {}
+
 # --- СТАРТ И ОБЩИЕ КОМАНДЫ ---
 
 @dp.message(Command("start"))
@@ -163,42 +182,77 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     kb = await get_user_main_kb(message.from_user.id)
     await message.answer("Главное меню:", reply_markup=kb)
 
-# --- АДМИН ПАНЕЛЬ (ПРОВЕРКА ПАРОЛЯ) ---
+# --- АДМИН ПАНЕЛЬ И ВВОД ПИН-КОДА КНОПКАМИ ---
 
 @dp.message(F.text == "🔑 Админ панель")
-async def admin_entry(message: types.Message, state: FSMContext):
-    await message.answer("🔑 Введите пароль для входа в админ панель:", reply_markup=get_cancel_kb())
-    await state.set_state(AdminStates.waiting_for_password)
+async def admin_entry(message: types.Message):
+    user_pins[message.from_user.id] = ""
+    await message.answer(
+        "🔐 **Введите пароль администратора:**\n\nПароль: `_`",
+        reply_markup=get_pin_keyboard(),
+        parse_mode="Markdown"
+    )
 
-@dp.message(AdminStates.waiting_for_password, F.text)
-async def check_admin_password(message: types.Message, state: FSMContext):
-    if message.text == "❌ Выйти":
-        await state.clear()
-        kb = await get_user_main_kb(message.from_user.id)
-        await message.answer("Вы вышли в главное меню.", reply_markup=kb)
+@dp.callback_query(F.data.startswith("pin_"))
+async def process_pin_input(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    current_pin = user_pins.get(user_id, "")
+    action = callback.data
+
+    if action == "pin_cancel":
+        user_pins.pop(user_id, None)
+        await callback.message.delete()
+        await callback.answer("Вход отменен.")
         return
 
-    if message.text.strip() == ADMIN_PASSWORD:
-        await state.clear()
+    if action == "pin_clear":
+        current_pin = ""
+    elif action.startswith("pin_num_"):
+        num = action.split("_")[2]
+        if len(current_pin) < 6:
+            current_pin += num
+
+    user_pins[user_id] = current_pin
+
+    # Проверка пароля
+    if current_pin == ADMIN_PASSWORD:
+        user_pins.pop(user_id, None)
+        await callback.message.delete()  # Удаляем клавиатуру с цифрами
+        
         conn = await get_db()
         users = await conn.fetch("SELECT username, joined_at FROM users ORDER BY joined_at DESC LIMIT 5")
         await conn.close()
 
-        text = "🔓 Добро пожаловать в Админ Панель!\n\n📋 **Последние зарегистрированные пользователи:**\n"
+        text = "🔓 **Пароль верный! Добро пожаловать в Админ Панель!**\n\n📋 **Последние зарегистрированные пользователи:**\n"
         for u in users:
             username = f"@{u['username']}" if u['username'] else "Без username"
             time_str = u['joined_at'].strftime("%Y-%m-%d %H:%M") if u['joined_at'] else "Неизвестно"
             text += f"• {username} ({time_str})\n"
 
-        await message.answer(text, reply_markup=get_admin_main_kb(), parse_mode="Markdown")
-    else:
-        await message.answer("❌ Неверный пароль! Попробуйте снова или нажмите '❌ Выйти'.")
+        # Переключаем интерфейс на админский
+        await callback.message.answer(text, reply_markup=get_admin_main_kb(), parse_mode="Markdown")
+        await callback.answer("Доступ разрешен!")
+        return
+
+    # Отображаем звездочки для безопасности
+    masked_pin = "*" * len(current_pin) if current_pin else "_"
+    
+    try:
+        await callback.message.edit_text(
+            f"🔐 **Введите пароль администратора:**\n\nПароль: `{masked_pin}`",
+            reply_markup=get_pin_keyboard(),
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
+
+    await callback.answer()
 
 @dp.message(F.text == "🚪 Выйти из админки")
 async def exit_admin(message: types.Message, state: FSMContext):
     await state.clear()
     kb = await get_user_main_kb(message.from_user.id)
-    await message.answer("Вы вышли из админ панели.", reply_markup=kb)
+    await message.answer("Вы успешно вышли из админ панели.", reply_markup=kb)
 
 # --- ТГК КНОПКИ ---
 
@@ -210,7 +264,7 @@ async def process_tgk(message: types.Message):
 async def process_tgk_friend(message: types.Message):
     await message.answer("Переходи на канал нашего кента:", reply_markup=get_tgk_friend_inline_kb())
 
-# --- ОСВОБОЖДЕНИЕ ГРУЗОВИКА (ТОЛЬКО ДЛЯ АДМИНА) ---
+# --- ОСВОБОЖДЕНИЕ ГРУЗОВИКА (ДЛЯ АДМИНА) ---
 
 @dp.message(F.text == "🔓 Освободить грузовик")
 async def admin_free_truck_list(message: types.Message):
