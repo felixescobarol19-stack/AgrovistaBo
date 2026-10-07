@@ -91,7 +91,6 @@ async def get_user_main_kb(user_id: int):
     in_trip = await has_truck(user_id)
 
     if in_trip:
-        # Кнопки, когда у водителя есть грузовик
         builder.button(text="🚚 В пути")
         builder.button(text="🏬 На базе")
         builder.button(text="🚛 Мой грузовик")
@@ -102,7 +101,6 @@ async def get_user_main_kb(user_id: int):
         builder.button(text="🔑 Админ панель")
         builder.adjust(2, 2, 3, 1)
     else:
-        # Обычные кнопки, когда грузовика нет
         builder.button(text="🚚 Просмотреть свободные грузовики")
         builder.button(text="📰 Актуальные новости")
         builder.button(text="📢 ТГК")
@@ -165,26 +163,22 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     kb = await get_user_main_kb(message.from_user.id)
     await message.answer("Главное меню:", reply_markup=kb)
 
-# --- ТГК КНОПКИ ---
-
-@dp.message(F.text == "📢 ТГК")
-async def process_tgk(message: types.Message):
-    await message.answer("Переходи на наш канал:", reply_markup=get_tgk_inline_kb())
-
-@dp.message(F.text == "🤝 ТГК кента")
-async def process_tgk_friend(message: types.Message):
-    await message.answer("Переходи на канал нашего кента:", reply_markup=get_tgk_friend_inline_kb())
-
-# --- АДМИН ПАНЕЛЬ ---
+# --- АДМИН ПАНЕЛЬ (ПРОВЕРКА ПАРОЛЯ) ---
 
 @dp.message(F.text == "🔑 Админ панель")
 async def admin_entry(message: types.Message, state: FSMContext):
-    await message.answer("🔑 Введи пароль для входа в админ панель:", reply_markup=get_cancel_kb())
+    await message.answer("🔑 Введите пароль для входа в админ панель:", reply_markup=get_cancel_kb())
     await state.set_state(AdminStates.waiting_for_password)
 
-@dp.message(AdminStates.waiting_for_password)
+@dp.message(AdminStates.waiting_for_password, F.text)
 async def check_admin_password(message: types.Message, state: FSMContext):
-    if message.text == ADMIN_PASSWORD:
+    if message.text == "❌ Выйти":
+        await state.clear()
+        kb = await get_user_main_kb(message.from_user.id)
+        await message.answer("Вы вышли в главное меню.", reply_markup=kb)
+        return
+
+    if message.text.strip() == ADMIN_PASSWORD:
         await state.clear()
         conn = await get_db()
         users = await conn.fetch("SELECT username, joined_at FROM users ORDER BY joined_at DESC LIMIT 5")
@@ -198,13 +192,23 @@ async def check_admin_password(message: types.Message, state: FSMContext):
 
         await message.answer(text, reply_markup=get_admin_main_kb(), parse_mode="Markdown")
     else:
-        await message.answer("❌ Неверный пароль! Попробуй снова или нажми '❌ Выйти'.")
+        await message.answer("❌ Неверный пароль! Попробуйте снова или нажмите '❌ Выйти'.")
 
 @dp.message(F.text == "🚪 Выйти из админки")
 async def exit_admin(message: types.Message, state: FSMContext):
     await state.clear()
     kb = await get_user_main_kb(message.from_user.id)
     await message.answer("Вы вышли из админ панели.", reply_markup=kb)
+
+# --- ТГК КНОПКИ ---
+
+@dp.message(F.text == "📢 ТГК")
+async def process_tgk(message: types.Message):
+    await message.answer("Переходи на наш канал:", reply_markup=get_tgk_inline_kb())
+
+@dp.message(F.text == "🤝 ТГК кента")
+async def process_tgk_friend(message: types.Message):
+    await message.answer("Переходи на канал нашего кента:", reply_markup=get_tgk_friend_inline_kb())
 
 # --- ОСВОБОЖДЕНИЕ ГРУЗОВИКА (ТОЛЬКО ДЛЯ АДМИНА) ---
 
@@ -246,7 +250,6 @@ async def process_admin_free_truck(callback: types.CallbackQuery):
         await callback.answer("✅ Грузовик успешно освобожден!", show_alert=True)
         await callback.message.edit_text(f"✅ Грузовик **{truck['truck_name']}** освобожден админом.", parse_mode="Markdown")
 
-        # Уведомляем пользователя, что его грузовик освобожден
         try:
             kb = await get_user_main_kb(busy_user_id)
             await bot.send_message(busy_user_id, f"🔓 Администратор освободил ваш грузовик ({truck['truck_name']}).", reply_markup=kb)
