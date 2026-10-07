@@ -19,19 +19,23 @@ ADMIN_PASSWORD = "8838"
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# FSM Состояния
+# --- FSM СОСТОЯНИЯ ---
 class AdminStates(StatesGroup):
     add_truck_photo = State()
     add_truck_name = State()
     add_truck_desc = State()
+    
     add_trailer_photo = State()
     add_trailer_name = State()
     add_trailer_desc = State()
+    
+    add_mods_link = State()
     confirm_add_truck = State()
     
     broadcast_content = State()
     broadcast_count = State()
 
+# --- БАЗА ДАННЫХ ---
 async def get_db():
     return await asyncpg.connect(DATABASE_URL)
 
@@ -41,6 +45,7 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             username TEXT,
+            full_name TEXT,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -53,6 +58,7 @@ async def init_db():
             trailer_photo TEXT,
             trailer_name TEXT,
             trailer_desc TEXT,
+            mods_link TEXT,
             is_busy BOOLEAN DEFAULT FALSE,
             busy_by BIGINT REFERENCES users(user_id) ON DELETE SET NULL
         )
@@ -73,7 +79,8 @@ async def has_truck(user_id: int) -> bool:
     await conn.close()
     return truck is not None
 
-# Главное меню обычного пользователя
+# --- КЛАВИАТУРЫ ---
+
 async def get_user_main_kb(user_id: int):
     builder = ReplyKeyboardBuilder()
     in_trip = await has_truck(user_id)
@@ -98,15 +105,16 @@ async def get_user_main_kb(user_id: int):
 
     return builder.as_markup(resize_keyboard=True)
 
-# Главное меню админа
 def get_admin_main_kb():
     builder = ReplyKeyboardBuilder()
     builder.button(text="➕ Добавить грузовик")
     builder.button(text="🔓 Освободить грузовик")
     builder.button(text="👥 Работники")
+    builder.button(text="📊 Итоги работников")
+    builder.button(text="📜 Список пользователей")
     builder.button(text="📩 Рассылка по боту")
     builder.button(text="🚪 Выйти из админки")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_cancel_kb():
@@ -141,16 +149,17 @@ user_pins = {}
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     conn = await get_db()
-    await conn.execute(
-        "INSERT INTO users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
-        message.from_user.id, message.from_user.username
-    )
+    await conn.execute("""
+        INSERT INTO users (user_id, username, full_name) 
+        VALUES ($1, $2, $3) 
+        ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
+    """, message.from_user.id, message.from_user.username, message.from_user.full_name)
     await conn.close()
 
     kb = await get_user_main_kb(message.from_user.id)
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}! Добро пожаловать в бот Agrovista!\n"
-        "Выбери нужный раздел в меню ниже.",
+        "Выберите нужный раздел в меню ниже.",
         reply_markup=kb
     )
 
@@ -193,8 +202,6 @@ async def process_pin_input(callback: types.CallbackQuery, state: FSMContext):
     if current_pin == ADMIN_PASSWORD:
         user_pins.pop(user_id, None)
         await callback.message.delete()
-        
-        # Важно: Отправляем новое сообщение с админской клавиатурой для смены интерфейса снизу
         await callback.message.answer(
             "🔓 **Пароль верный! Вы вошли в Админ Панель.**\nИнтерфейс переключен.",
             reply_markup=get_admin_main_kb(),
@@ -220,7 +227,7 @@ async def exit_admin(message: types.Message, state: FSMContext):
     kb = await get_user_main_kb(message.from_user.id)
     await message.answer("Вы успешно вышли из админ панели.", reply_markup=kb)
 
-# --- ДОБАВЛЕНИЕ ГРУЗОВИКА С ПОДТВЕРЖДЕНИЕМ ---
+# --- ДОБАВЛЕНИЕ СЦЕПКИ И ССЫЛКИ НА МОДЫ ---
 
 @dp.message(F.text == "➕ Добавить грузовик")
 async def add_truck_start(message: types.Message, state: FSMContext):
@@ -262,12 +269,22 @@ async def process_trailer_name(message: types.Message, state: FSMContext):
 async def process_trailer_desc(message: types.Message, state: FSMContext):
     desc = "" if message.text.strip() == "-" else message.text
     await state.update_data(trailer_desc=desc)
-    
+    await message.answer("🔗 Отправьте **ссылку на моды** для этой сцепки (если нет, поставьте `-`):")
+    await state.set_state(AdminStates.add_mods_link)
+
+@dp.message(AdminStates.add_mods_link)
+async def process_mods_link(message: types.Message, state: FSMContext):
+    mods_link = "" if message.text.strip() == "-" else message.text
+    await state.update_data(mods_link=mods_link)
+
     data = await state.get_data()
     caption = (
-        f"📋 **Проверьте данные сцепки:**\n\n"
-        f"🚚 **Грузовик:** {data['truck_name']}\n📝 {data.get('truck_desc') or 'Без описания'}\n\n"
-        f"🚛 **Прицеп:** {data['trailer_name']}\n📝 {data.get('trailer_desc') or 'Без описания'}\n\n"
+        f"📋 **Проверьте данные сцепки перед публикацией:**\n\n"
+        f"🚚 **Грузовик:** {data['truck_name']}\n"
+        f"📝 **Описание грузовика:** {data.get('truck_desc') or 'Отсутствует'}\n\n"
+        f"🚛 **Прицеп:** {data['trailer_name']}\n"
+        f"📝 **Описание прицепа:** {data.get('trailer_desc') or 'Отсутствует'}\n\n"
+        f"🔗 **Ссылка на моды:** {data.get('mods_link') or 'Отсутствует'}\n\n"
         "Нажмите кнопку ниже для подтверждения."
     )
     await message.answer(caption, reply_markup=get_confirm_truck_kb(), parse_mode="Markdown")
@@ -280,19 +297,20 @@ async def save_truck_confirm(message: types.Message, state: FSMContext):
 
     conn = await get_db()
     await conn.execute("""
-        INSERT INTO trucks (truck_photo, truck_name, truck_desc, trailer_photo, trailer_name, trailer_desc)
-        VALUES ($1, $2, $3, $4, $5, $6)
-    """, data['truck_photo'], data['truck_name'], data['truck_desc'], data['trailer_photo'], data['trailer_name'], data['trailer_desc'])
+        INSERT INTO trucks (truck_photo, truck_name, truck_desc, trailer_photo, trailer_name, trailer_desc, mods_link)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+    """, data['truck_photo'], data['truck_name'], data['truck_desc'], 
+       data['trailer_photo'], data['trailer_name'], data['trailer_desc'], data['mods_link'])
     await conn.close()
 
-    await message.answer("✅ Сцепка успешно добавлена и появилась в свободных грузовиках!", reply_markup=get_admin_main_kb())
+    await message.answer("✅ Сцепка успешно добавлена!", reply_markup=get_admin_main_kb())
 
-# --- РАБОТНИКИ ---
+# --- АДМИНКА: РАБОТНИКИ, ИТОГИ И СПИСОК ПОЛЬЗОВАТЕЛЕЙ ---
 
 @dp.message(F.text == "👥 Работники")
 async def show_workers_status(message: types.Message):
     conn = await get_db()
-    users = await conn.fetch("SELECT user_id, username FROM users")
+    users = await conn.fetch("SELECT user_id, username, full_name FROM users")
     activities = await conn.fetch("SELECT user_id, status FROM activity")
     await conn.close()
 
@@ -304,7 +322,7 @@ async def show_workers_status(message: types.Message):
     no_status = []
 
     for u in users:
-        u_name = f"@{u['username']}" if u['username'] else f"ID: {u['user_id']}"
+        u_name = f"@{u['username']}" if u['username'] else f"{u['full_name']} (ID: {u['user_id']})"
         st = act_dict.get(u['user_id'])
         
         if st == "В пути 🚚":
@@ -317,26 +335,65 @@ async def show_workers_status(message: types.Message):
             no_status.append(u_name)
 
     text = f"👥 **Информация о работниках (Всего: {len(users)}):**\n\n"
-    
-    text += f"🚚 **В пути ({len(on_the_way)}):**\n"
-    text += ("\n".join([f"• {u}" for u in on_the_way]) if on_the_way else "Никого") + "\n\n"
-
-    text += f"🏬 **На базе ({len(at_base)}):**\n"
-    text += ("\n".join([f"• {u}" for u in at_base]) if at_base else "Никого") + "\n\n"
-
-    text += f"🏁 **Завершили рейс ({len(finished)}):**\n"
-    text += ("\n".join([f"• {u}" for u in finished]) if finished else "Никого") + "\n\n"
-
-    text += f"💤 **Без активного статуса ({len(no_status)}):**\n"
-    text += ("\n".join([f"• {u}" for u in no_status]) if no_status else "Никого")
+    text += f"🚚 **В пути ({len(on_the_way)}):**\n" + ("\n".join([f"• {u}" for u in on_the_way]) if on_the_way else "Никого") + "\n\n"
+    text += f"🏬 **На базе ({len(at_base)}):**\n" + ("\n".join([f"• {u}" for u in at_base]) if at_base else "Никого") + "\n\n"
+    text += f"🏁 **Завершили рейс ({len(finished)}):**\n" + ("\n".join([f"• {u}" for u in finished]) if finished else "Никого") + "\n\n"
+    text += f"💤 **Без статуса ({len(no_status)}):**\n" + ("\n".join([f"• {u}" for u in no_status]) if no_status else "Никого")
 
     await message.answer(text, parse_mode="Markdown")
 
-# --- РАССЫЛКА С ВЫБОРОМ КОЛИЧЕСТВА ПОВТОРОВ ---
+@dp.message(F.text == "📊 Итоги работников")
+async def show_workers_summary(message: types.Message):
+    conn = await get_db()
+    total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+    busy_trucks = await conn.fetchval("SELECT COUNT(*) FROM trucks WHERE is_busy = TRUE")
+    free_trucks = await conn.fetchval("SELECT COUNT(*) FROM trucks WHERE is_busy = FALSE")
+    
+    on_way = await conn.fetchval("SELECT COUNT(*) FROM activity WHERE status = 'В пути 🚚'")
+    at_base = await conn.fetchval("SELECT COUNT(*) FROM activity WHERE status = 'На базе 🏬'")
+    finished = await conn.fetchval("SELECT COUNT(*) FROM activity WHERE status = 'Рейс окончен 🏁'")
+    await conn.close()
+
+    text = (
+        f"📊 **ИТОГИ РАБОТНИКОВ И ПАРКА:**\n\n"
+        f"👥 **Всего работников:** `{total_users}`\n"
+        f"🚛 **Занято сцепок:** `{busy_trucks}`\n"
+        f"🟢 **Свободно сцепок:** `{free_trucks}`\n\n"
+        f"📈 **Текущая активность:**\n"
+        f"• 🚚 В пути: `{on_way}`\n"
+        f"• 🏬 На базе: `{at_base}`\n"
+        f"• 🏁 Завершили рейс: `{finished}`"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(F.text == "📜 Список пользователей")
+async def show_users_list(message: types.Message):
+    conn = await get_db()
+    users = await conn.fetch("SELECT user_id, username, full_name, joined_at FROM users ORDER BY joined_at DESC")
+    await conn.close()
+
+    if not users:
+        await message.answer("📜 Список пользователей пуст.")
+        return
+
+    text = f"📜 **Список зарегистрированных пользователей (Всего: {len(users)}):**\n\n"
+    for idx, u in enumerate(users, start=1):
+        username = f"@{u['username']}" if u['username'] else "Без username"
+        name = u['full_name'] or "Пользователь"
+        text += f"{idx}. **{name}** | {username} | `ID: {u['user_id']}`\n"
+
+    # Деление сообщения при превышении лимита длины Telegram
+    if len(text) > 4000:
+        for x in range(0, len(text), 4000):
+            await message.answer(text[x:x+4000], parse_mode="Markdown")
+    else:
+        await message.answer(text, parse_mode="Markdown")
+
+# --- РАССЫЛКА ---
 
 @dp.message(F.text == "📩 Рассылка по боту")
 async def start_broadcast(message: types.Message, state: FSMContext):
-    await message.answer("✍️ Отправьте сообщение для рассылки (текст или фото с текстом):", reply_markup=get_cancel_kb())
+    await message.answer("✍️ Отправьте сообщение для рассылки:", reply_markup=get_cancel_kb())
     await state.set_state(AdminStates.broadcast_content)
 
 @dp.message(AdminStates.broadcast_content)
@@ -380,7 +437,7 @@ async def run_broadcast_repeat(message: types.Message, state: FSMContext):
         except Exception:
             pass
 
-    await message.answer(f"✅ Рассылка успешно отправлена {count} пользователям ({repeats} раз(а))!", reply_markup=get_admin_main_kb())
+    await message.answer(f"✅ Рассылка отправлена {count} пользователям ({repeats} раз(а))!", reply_markup=get_admin_main_kb())
 
 # --- УПРАВЛЕНИЕ СТАТУСАМИ ---
 
@@ -427,7 +484,7 @@ async def finish_trip(message: types.Message):
 
     await message.answer("🏆 Отличная работа! Ваш статус отправлен диспетчеру.")
 
-# --- ПРОСМОТР И ОСВОБОЖДЕНИЕ ГРУЗОВИКОВ ---
+# --- ПРОСМОТР И ВЫБОР СЦЕПКИ ---
 
 @dp.message(F.text == "🔓 Освободить грузовик")
 async def admin_free_truck_list(message: types.Message):
@@ -481,18 +538,19 @@ async def send_truck_card(chat_id: int, page: int):
     total = await conn.fetchval("SELECT COUNT(*) FROM trucks")
     if total == 0:
         await conn.close()
-        await bot.send_message(chat_id, "🚛 Грузовики пока не добавлены.")
+        await bot.send_message(chat_id, "🚛 Свободные грузовики пока отсутствуют.")
         return
 
     truck = await conn.fetchrow("SELECT * FROM trucks ORDER BY id LIMIT 1 OFFSET $1", page)
     await conn.close()
 
     status_str = "🔴 Занят" if truck['is_busy'] else "🟢 Свободен"
+    
     caption = (
         f"🚚 **Грузовик:** {truck['truck_name']}\n"
-        f"📝 {truck['truck_desc'] or 'Без описания'}\n\n"
+        f"📝 **Описание:** {truck['truck_desc'] or 'Отсутствует'}\n\n"
         f"🚛 **Прицеп:** {truck['trailer_name']}\n"
-        f"📝 {truck['trailer_desc'] or 'Без описания'}\n\n"
+        f"📝 **Описание:** {truck['trailer_desc'] or 'Отсутствует'}\n\n"
         f"Статус: {status_str}"
     )
 
@@ -515,7 +573,7 @@ async def send_truck_card(chat_id: int, page: int):
     ]
 
     await bot.send_media_group(chat_id=chat_id, media=media)
-    await bot.send_message(chat_id=chat_id, text=f"Грузовик {page + 1} из {total}", reply_markup=builder.as_markup())
+    await bot.send_message(chat_id=chat_id, text=f"Сцепка {page + 1} из {total}", reply_markup=builder.as_markup())
 
 @dp.message(F.text == "🚚 Просмотреть свободные грузовики")
 async def view_trucks(message: types.Message):
@@ -538,7 +596,7 @@ async def take_truck(callback: types.CallbackQuery):
         await callback.answer("❌ У вас уже есть занятый грузовик!", show_alert=True)
         return
 
-    truck = await conn.fetchrow("SELECT is_busy FROM trucks WHERE id = $1", truck_id)
+    truck = await conn.fetchrow("SELECT is_busy, mods_link FROM trucks WHERE id = $1", truck_id)
     if truck['is_busy']:
         await conn.close()
         await callback.answer("❌ Этот грузовик уже кто-то занял!", show_alert=True)
@@ -547,11 +605,25 @@ async def take_truck(callback: types.CallbackQuery):
     await conn.execute("UPDATE trucks SET is_busy = TRUE, busy_by = $1 WHERE id = $2", callback.from_user.id, truck_id)
     await conn.close()
 
-    await callback.answer("✅ Вы успешно заняли этот грузовик!", show_alert=True)
+    await callback.answer("✅ Вы успешно заняли эту сцепку!", show_alert=True)
     kb = await get_user_main_kb(callback.from_user.id)
-    await callback.message.answer("🚚 Вы заняли грузовик! Теперь вам доступны кнопки управления рейсом.", reply_markup=kb)
+    
+    msg_text = "🚚 Вы успешно заняли сцепку! Теперь вам доступны кнопки управления рейсом в главном меню."
+    
+    # Отправляем отдельную кнопку на моды только ПОСЛЕ выбора
+    if truck['mods_link']:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📦 Скачать моды на сцепку", url=truck['mods_link'])
+        await callback.message.answer(
+            f"{msg_text}\n\nВот ваша ссылка на моды для сцепки:",
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await callback.message.answer(msg_text)
 
-# --- ДОПОЛНИТЕЛЬНЫЕ И КАНАЛЫ ---
+    await callback.message.answer("Главное меню обновлено:", reply_markup=kb)
+
+# --- МОЙ ГРУЗОВИК И ДРУГИЕ РАЗДЕЛЫ ---
 
 @dp.message(F.text == "🚛 Мой грузовик")
 async def my_truck(message: types.Message):
@@ -565,14 +637,21 @@ async def my_truck(message: types.Message):
 
     caption = (
         f"🚛 **Ваш текущий грузовик:**\n\n"
-        f"🚚 **Грузовик:** {truck['truck_name']}\n📝 {truck['truck_desc'] or 'Без описания'}\n\n"
-        f"🚛 **Прицеп:** {truck['trailer_name']}\n📝 {truck['trailer_desc'] or 'Без описания'}"
+        f"🚚 **Грузовик:** {truck['truck_name']}\n"
+        f"📝 **Описание:** {truck['truck_desc'] or 'Отсутствует'}\n\n"
+        f"🚛 **Прицеп:** {truck['trailer_name']}\n"
+        f"📝 **Описание:** {truck['trailer_desc'] or 'Отсутствует'}"
     )
     media = [
         InputMediaPhoto(media=truck['truck_photo'], caption=caption, parse_mode="Markdown"),
         InputMediaPhoto(media=truck['trailer_photo'])
     ]
     await message.answer_media_group(media=media)
+
+    if truck['mods_link']:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📦 Скачать моды на сцепку", url=truck['mods_link'])
+        await message.answer("Ссылка на сборку модов:", reply_markup=builder.as_markup())
 
 @dp.message(F.text == "📰 Актуальные новости")
 async def show_news(message: types.Message):
