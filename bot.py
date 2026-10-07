@@ -12,7 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 logging.basicConfig(level=logging.INFO)
 
 # Получаем конфиги из переменных окружения
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("8885361819:AAE9QP5vxVpka5pWLZxMlhUDUqlwZSEwA5Y")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_PASSWORD = "8838"
 
